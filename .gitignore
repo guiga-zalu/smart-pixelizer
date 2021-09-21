@@ -1,0 +1,4 @@
+tests/images
+tests/images/*
+untracked
+untracked/*

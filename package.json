@@ -1,0 +1,17 @@
+{
+	"name": "smart-pixelizer",
+	"version": "1.0.0",
+	"description": "Smart Pixelizes an image",
+	"main": "smart-pixelizer.js",
+	"directories": {
+		"test": "tests"
+	},
+	"scripts": {
+		"test": "cmd ./tests/run-tests.cmd"
+	},
+	"dependencies": {
+		"jimp": "latest"
+	},
+	"author": "Guilherme Alves C Zaluchi <desenv@guilherme.zaluchi.com.br>",
+	"license": "ISC"
+}
