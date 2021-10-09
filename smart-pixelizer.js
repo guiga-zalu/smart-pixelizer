@@ -2,8 +2,16 @@
 
 const	Jimp = require("jimp"),
 		ImageBlockSplitter = require("./image-block-splitter"),
-		zero = () => 0,
-		zeroFilled = n => Array.from({ length: n }, zero);
+		YPbPr = require("./y-pb-pr")(.2126, .7152, .0722),
+		math = {
+			zero: () => 0,
+			zeroFilled: n => Array.from({ length: n }, math.zero),
+			restrain(a, b){
+				var min = Math.min(a, b), max = Math.max(a, b);
+				return x => Math.max(min, Math.min(max, x));
+			}
+		},
+		restrain0_1 = math.restrain(0, 1);
 
 const Compressor = {
 	/**
@@ -19,17 +27,21 @@ const Compressor = {
 		
 		// blocos = n *** (- chão(log_n(densidade)))
 		// blocos = exp(- chão(log_n(densidade)) log n)
-		let blocos = Math.exp(- Math.floor(Math.log(density) / stabilityLog) * stabilityLog);
+		// let blocos = Math.exp(- Math.floor(Math.log(density) / stabilityLog) * stabilityLog);
+		let sobre_blocos = Math.exp(Math.round(Math.log(density) / stabilityLog) * stabilityLog);
 		try{
 			return block
-				.resize(Math.max(1, width / blocos), Math.max(1, height / blocos))
+				.resize(
+					Math.max(1, width * sobre_blocos),
+					Math.max(1, height * sobre_blocos)
+				)
 				.resize(width, height, Jimp.RESIZE_NEAREST_NEIGHBOR);
 		}catch(e){
 			throw new Error(
 				`#block = (${width}; ${height});
 	density = ${density};
 	stabilitySize = ${stabilitySize};
-	blocos = ${blocos}`
+	sobre_blocos = ${sobre_blocos}`
 			);
 		}
 	},
@@ -69,15 +81,20 @@ const Convolutor = {
 	 * @param { "laplace" | "sobel" } [fn = "laplace"]
 	 * @param { IMGDataBlock } bitmap 
 	 * @param { IMGDataBlockBlock } blocks 
+	 * @param { SmartPixelizer_params } params
 	 * @returns { number[][] }
 	 */
-	run(fn = "laplace", bitmap, blocks){
+	run(fn = "laplace", bitmap, blocks, params){
 		const	{ width, height, data } = bitmap,
 				{ cols, rows } = blocks,
-				filtro = zeroFilled(data.length >> 2),
-				somas = Array.from({ length: rows }, () => zeroFilled(cols)),
-				func = Convolutor[fn];
-			
+				filtro = math.zeroFilled(data.length >> 2),
+				somas = Array.from({ length: rows }, math.zeroFilled.bind(math, cols)),
+				func = Convolutor[fn],
+				/** @type { number[] } */
+				weights = [...params.weights];
+		
+		weights.push(weights.reduce((s, w) => s + w));
+		
 		var	x, y;
 		
 		// * Calcula o filtro
@@ -87,7 +104,7 @@ const Convolutor = {
 		for(x = 0; x < width; x++)
 			for(y = 0; y < height; y++){
 				idx = y * width + x;
-				filtro[idx] = func(x, y, idx << 2, bitmap);
+				filtro[idx] = func(x, y, idx << 2, bitmap, weights);
 			}
 		
 		// * Soma os valores por bloco
@@ -96,17 +113,19 @@ const Convolutor = {
 		// Para cada bloco
 		for(var by = 0, bx; by < rows; by++)
 			for(bx = 0; bx < cols; bx++){
-				const	bloco = blocks[by][bx],
-						{ x: x_min, y: y_min, width: bw, height: bh } = bloco,
-						x_max = x_min + bw,
-						y_max = y_min + bh;
+				const	{
+						x: x_min, y: y_min,
+						width: bw, height: bh
+					} = blocks[by][bx],
+					x_max = x_min + bw,
+					y_max = y_min + bh;
 				
 				soma = 0;
 				for(y = y_min; y < y_max; y++)
 					for(x = x_min; x < x_max; x++)
 						soma += filtro[y * width + x];
 				
-				somas[by][bx] = soma / (bw * bh);
+				somas[by][bx] = soma / (bw * bh) / 255;
 			}
 		
 		return somas;
@@ -117,9 +136,73 @@ const Convolutor = {
 	 * @param { number } y
 	 * @param { number } idx
 	 * @param { IMGDataBlock } bitmap Bloco
+	 * @param { [ Wy: number, Wpb: number, Wpr: number, WS: number ] } weights
 	 * @returns { number }
 	 */
-	laplace(x, y, idx, bitmap){
+	laplace(x, y, idx, bitmap, [Wy, Wpb, Wpr, WS]){
+		const	{ width, height, data } = bitmap,
+				w2 = width << 2;
+		
+		var [laplaceY, laplacePb, laplacePr] = [0, 0, 0], count = 0;
+		var Y, Pb, Pr;
+		if(y > 0){
+			[Y, Pb, Pr] = SmartPixelizer.getLevels(data, idx - w2);
+			laplaceY += 2 * Y, laplacePb += 2 * Pb, laplacePr += 2 * Pr;
+			count++;
+			if(x > 0){
+				[Y, Pb, Pr] = SmartPixelizer.getLevels(data, idx - w2 - 4);
+				laplaceY += Y, laplacePb += Pb, laplacePr += Pr;
+				count++;
+			}
+			if(x < width - 1){
+				[Y, Pb, Pr] = SmartPixelizer.getLevels(data, idx - w2 + 4);
+				laplaceY += Y, laplacePb += Pb, laplacePr += Pr;
+				count++;
+			}
+		}
+		if(y < height - 1){
+			[Y, Pb, Pr] = SmartPixelizer.getLevels(data, idx + w2);
+			laplaceY += 2 * Y, laplacePb += 2 * Pb, laplacePr += 2 * Pr;
+			count++;
+			if(x > 0){
+				[Y, Pb, Pr] = SmartPixelizer.getLevels(data, idx + w2 - 4);
+				laplaceY += Y, laplacePb += Pb, laplacePr += Pr;
+				count++;
+			}
+			if(x < width - 1){
+				[Y, Pb, Pr] = SmartPixelizer.getLevels(data, idx + w2 + 4);
+				laplaceY += Y, laplacePb += Pb, laplacePr += Pr;
+				count++;
+			}
+		}
+		if(x > 0){
+			[Y, Pb, Pr] = SmartPixelizer.getLevels(data, idx - 4);
+			laplaceY += 2 * Y, laplacePb += 2 * Pb, laplacePr += 2 * Pr;
+			count++;
+		}
+		if(x < width - 1){
+			[Y, Pb, Pr] = SmartPixelizer.getLevels(data, idx + 4);
+			laplaceY += 2 * Y, laplacePb += 2 * Pb, laplacePr += 2 * Pr;
+			count++;
+		}
+		
+		[Y, Pb, Pr] = SmartPixelizer.getLevels(data, idx);
+		// The difference in Gamma has double the importance of the difference in each Chroma
+		return	(
+			Wy * Math.abs(Y - laplaceY / count) +
+			Wpb * Math.abs(Pb - laplacePb / count) +
+			Wpr * Math.abs(Pr - laplacePr / count)
+		) / WS;
+	},
+	/**
+	 * 
+	 * @param { number } x
+	 * @param { number } y
+	 * @param { number } idx
+	 * @param { IMGDataBlock } bitmap Bloco
+	 * @returns { number }
+	 */
+	laplaceOverGamma(x, y, idx, bitmap){
 		const	{ width, height, data } = bitmap,
 				w2 = width << 2;
 		
@@ -239,14 +322,18 @@ const SmartPixelizer = {
 	/**
 	 * Pixeliza uma imagem
 	 * @async
-	 * @param { JimpConstructable } jimp Imagem Jimp
+	 * @param { JimpConstructable } _jimp Imagem Jimp
 	 * @param { SmartPixelizer_params } [params = {}] Parâmetros
 	 * @returns { Jimp } Imagem pixelizada
 	 * @memberof SmartPixelizer
 	 */
-	pixelize(jimp, params = {}){
-		if(!(jimp instanceof Jimp))
-			return Jimp.read(jimp).then(img => SmartPixelizer.pixelize(img, params));
+	async pixelize(_jimp, params = {}){
+		/** @type { Jimp } */
+		var jimp;
+		if(!(_jimp instanceof Jimp))
+			// return Jimp.read(jimp).then(img => SmartPixelizer.pixelize(img, params));
+			jimp = Jimp.read(jimp);
+		else jimp = _jimp;
 		
 		const { width, height } = jimp.bitmap;
 		
@@ -255,6 +342,7 @@ const SmartPixelizer = {
 			times: 1,
 			process: SmartPixelizer.PROCESS_LAPLACE,
 			compress: SmartPixelizer.COMPRESS_RESIZE,
+			densityMap: x => x,
 			...params
 		};
 		
@@ -270,21 +358,22 @@ const SmartPixelizer = {
 		params.times *= SmartPixelizer.BASE_MULTIPLIER;
 		if("stabilitySize" in params)
 			params.stabilityLog = Math.log(params.stabilitySize);
+		if(params.process === SmartPixelizer.PROCESS_LAPLACE && !("weights" in params))
+			params.weights = [4, 1, 1];
 		
-		const	blocos = ImageBlockSplitter.splitBitmap(jimp.bitmap, params),
+		const	blocos = ImageBlockSplitter.splitJimp(jimp, params),
 				mapa_de_densidade = SmartPixelizer.imageDensity(jimp.bitmap, blocos, params),
 				{ cols, rows } = blocos;
 		
 		var retorno = new Jimp(width, height, 0xffffffff);
 		
-		const { densityMap } = params;
 		// console.log(mapa_de_densidade)
 		for(var x, y = rows - 1; y >= 0; y--)
 			for(x = cols - 1; x >= 0; x--)
 				retorno = SmartPixelizer.applyDensityMap(
 					retorno,
 					blocos[y][x],
-					densityMap(mapa_de_densidade[y][x]),
+					mapa_de_densidade[y][x],
 					params
 				);
 		
@@ -298,13 +387,19 @@ const SmartPixelizer = {
 	 * @memberof SmartPixelizer
 	 */
 	imageDensity(bitmap, blocks, params){
-		const { times } = params;
+		const { times, densityMap } = params;
 		
 		const fn = params.process === SmartPixelizer.PROCESS_LAPLACE
 			? "laplace"
 			: "sobel";
 		
-		return Convolutor.run(fn, bitmap, blocks).map(s => s.map(v => v * times));
+		return Convolutor.run(fn, bitmap, blocks, params).map(
+			s => s.map(
+				v => restrain0_1(
+					densityMap(restrain0_1(v)) * times
+				)
+			)
+		);
 	},
 	/**
 	 * @param { Jimp } jimp
@@ -317,7 +412,9 @@ const SmartPixelizer = {
 	applyDensityMap(jimp, block, density, params){
 		var { x, y, width, height } = block;
 		// console.log(density)
-		density = Math.min(Math.max(density, 0), 1);
+		if(isNaN(density))
+			density = 0;
+		density = restrain0_1(density);
 		
 		// console.log(`x; y: ${x}; ${y}\tw; h: ${width}; ${height}\tdensity: ${density}`);
 		
@@ -361,7 +458,16 @@ const SmartPixelizer = {
 	 * @memberof SmartPixelizer
 	 */
 	getLevel(data, idx){
-		return .2126 * data[idx] + .7152 * data[idx + 1] + .0722 * data[idx + 2];
+		return YPbPr.Y(data[idx], data[idx + 1], data[idx + 2]);
+	},
+	/**
+	 * @param { number[] | ArrayBufferView | Buffer | Uint8ClampedArray } data
+	 * @param { number } idx
+	 * @returns { [ Y: number, Pb: number, Pr: number ] }
+	 * @memberof SmartPixelizer
+	 */
+	getLevels(data, idx){
+		return YPbPr.YPbPr(data[idx], data[idx + 1], data[idx + 2]);
 	},
 	
 	PROCESS_SOBEL:		Symbol("sobel"),
@@ -374,7 +480,8 @@ const SmartPixelizer = {
 	
 	// Número arbitrário.
 	// Era 0.003. Foi arredondado para dar sorte.
-	BASE_MULTIPLIER: 0.01
+	// Era 0.384. Foi arredondado para dar sorte.
+	BASE_MULTIPLIER: 2.55
 };
 
 // export default SmartPixelizer;
@@ -409,5 +516,5 @@ module.exports = SmartPixelizer;
  * @property { (x: number) => number } densityMap	- Maps [0; 1] to [0; 1]
  */
 /**
- * @typedef { string | import("jimp") | Buffer | ImageBitmap } JimpConstructable
+ * @typedef { string | Jimp | Buffer | ImageBitmap } JimpConstructable
  */
