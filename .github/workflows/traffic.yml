@@ -1,7 +1,9 @@
+name: "GitHub traffic"
+
 on:
   schedule: 
     # runs once a week on sunday
-    - cron: "55 23 * * 0"
+    - cron: "10 2 * * 6"
     
 jobs:
   # This workflow contains a single job called "traffic"
